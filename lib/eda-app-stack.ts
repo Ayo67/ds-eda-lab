@@ -13,102 +13,102 @@ import { Construct } from "constructs";
 // import * as sqs from 'aws-cdk-lib/aws-sqs';
 
 export class EDAAppStack extends cdk.Stack {
-  constructor(scope: Construct, id: string, props?: cdk.StackProps) {
-    super(scope, id, props);
+    constructor(scope: Construct, id: string, props?: cdk.StackProps) {
+        super(scope, id, props);
 
-    const imagesBucket = new s3.Bucket(this, "images", {
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
-      publicReadAccess: false,
-    });
+        const imagesBucket = new s3.Bucket(this, "images", {
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+            autoDeleteObjects: true,
+            publicReadAccess: false,
+        });
 
-      // Integration infrastructure
+        const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
+            receiveMessageWaitTime: cdk.Duration.seconds(5),
+        });
 
-      const imageProcessQueue = new sqs.Queue(this, "img-created-queue", {
-        receiveMessageWaitTime: cdk.Duration.seconds(10),
-      });
+        const mailerQ = new sqs.Queue(this, "mailer-queue", {
+            receiveMessageWaitTime: cdk.Duration.seconds(10),
+        });
 
-      const newImageTopic = new sns.Topic(this, "NewImageTopic", {
-        displayName: "New Image topic",
-      }); 
+        const newImageTopic = new sns.Topic(this, "NewImageTopic", {
+            displayName: "New Image topic",
+        });
 
-      const mailerQ = new sqs.Queue(this, "mailer-queue", {
-        receiveMessageWaitTime: cdk.Duration.seconds(10),
-      });
+        // Lambda functions
 
-  // Lambda functions
+        const processImageFn = new lambdanode.NodejsFunction(
+            this,
+            "ProcessImageFn",
+            {
+                runtime: lambda.Runtime.NODEJS_22_X,
+                entry: `${__dirname}/../lambdas/processImage.ts`,
+                timeout: cdk.Duration.seconds(15),
+                memorySize: 128,
+            }
+        );
 
-  const processImageFn = new lambdanode.NodejsFunction(
-    this,
-    "ProcessImageFn",
-    {
-      runtime: lambda.Runtime.NODEJS_22_X,
-      entry: `${__dirname}/../lambdas/processImage.ts`,
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 128,
+        const mailerFn = new lambdanode.NodejsFunction(
+            this,
+            "mailer-function",
+            {
+                runtime: lambda.Runtime.NODEJS_22_X,
+                memorySize: 1024,
+                timeout: cdk.Duration.seconds(3),
+                entry: `${__dirname}/../lambdas/mailer.ts`,
+            }
+        );
+
+        // S3 --> SQS (make queue a subscriber to the SNS topic)
+        imagesBucket.addEventNotification(
+            s3.EventType.OBJECT_CREATED,
+            new s3n.SnsDestination(newImageTopic)
+        );
+
+        newImageTopic.addSubscription(
+            new subs.SqsSubscription(imageProcessQueue)
+        );
+
+        newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
+
+        // SQS --> Lambda (event source from the SQS queues)
+        const newImageEventSource = new events.SqsEventSource(
+            imageProcessQueue,
+            {
+                batchSize: 5,
+                maxBatchingWindow: cdk.Duration.seconds(5),
+            }
+        );
+
+        const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
+            batchSize: 5,
+            maxBatchingWindow: cdk.Duration.seconds(5),
+        });
+
+        //  triggers for the lambda functions
+        processImageFn.addEventSource(newImageEventSource);
+
+        mailerFn.addEventSource(newImageMailEventSource);
+
+        // Permissions
+
+        imagesBucket.grantRead(processImageFn);
+
+        mailerFn.addToRolePolicy(
+            new iam.PolicyStatement({
+                effect: iam.Effect.ALLOW,
+                actions: [
+                    "ses:SendEmail",
+                    "ses:SendRawEmail",
+                    "ses:SendTemplatedEmail",
+                ],
+                resources: ["*"],
+            })
+        );
+
+        // Output
+
+        new cdk.CfnOutput(this, "bucketName", {
+            value: imagesBucket.bucketName,
+        });
     }
-  );
-
-  const mailerFn = new lambdanode.NodejsFunction(this, "mailer-function", {
-    runtime: lambda.Runtime.NODEJS_16_X,
-    memorySize: 1024,
-    timeout: cdk.Duration.seconds(3),
-    entry: `${__dirname}/../lambdas/mailer.ts`,
-  });
-
-
-  // S3 --> SQS
-  imagesBucket.addEventNotification(
-    s3.EventType.OBJECT_CREATED,
-    new s3n.SnsDestination(newImageTopic)  // Changed
-);
-
-  newImageTopic.addSubscription(
-    new subs.SqsSubscription(imageProcessQueue)
-);
-
-newImageTopic.addSubscription(new subs.SqsSubscription(mailerQ));
-
-
-
-
- // SQS --> Lambda
-  const newImageEventSource = new events.SqsEventSource(imageProcessQueue, {
-    batchSize: 5,
-    maxBatchingWindow: cdk.Duration.seconds(5),
-  });
-
-  processImageFn.addEventSource(newImageEventSource);
-
-  const newImageMailEventSource = new events.SqsEventSource(mailerQ, {
-    batchSize: 5,
-    maxBatchingWindow: cdk.Duration.seconds(5),
-  }); 
-
-  mailerFn.addEventSource(newImageMailEventSource);
-
-  mailerFn.addToRolePolicy(
-    new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: [
-        "ses:SendEmail",
-        "ses:SendRawEmail",
-        "ses:SendTemplatedEmail",
-      ],
-      resources: ["*"],
-    })
-  );
-
-
-
-  // Permissions
-
-  imagesBucket.grantRead(processImageFn);
-
-    // Output
-    
-    new cdk.CfnOutput(this, "bucketName", {
-      value: imagesBucket.bucketName,
-    });
-  }
 }
